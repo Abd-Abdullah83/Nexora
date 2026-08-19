@@ -186,7 +186,7 @@ export async function resolveModerationFlag(params: {
     newValues: { note: params.note },
   });
 
-  if (flag.product.seller.userId) {
+  if (flag.product.seller?.userId) {
     await createNotification({
       userId: flag.product.seller.userId,
       type: "listing_moderation",

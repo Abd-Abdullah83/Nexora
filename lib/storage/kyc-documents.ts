@@ -129,7 +129,7 @@ export function getSignedKycDocumentUrl(
 ): string {
   const expiresAt = Math.floor(Date.now() / 1000) + expiresInSeconds;
 
-  return cloudinary.utils.private_download_url(publicId, undefined, {
+  return cloudinary.utils.private_download_url(publicId, "", {
     type: "authenticated",
     resource_type: "image", // Cloudinary's private_download_url defaults to "image"; PDFs uploaded via resource_type:"auto" are still served correctly under this for authenticated delivery
     expires_at: expiresAt,

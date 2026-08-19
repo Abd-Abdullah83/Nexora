@@ -98,7 +98,7 @@ export async function updateStore(
 
   const updated = await prisma.store.update({
     where: { sellerId },
-    data,
+    data: data as any,
   });
 
   await logAuditEvent({

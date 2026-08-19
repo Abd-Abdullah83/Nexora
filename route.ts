@@ -64,7 +64,7 @@ export async function PATCH(req: NextRequest) {
       where: { id },
       data: {
         status,
-        moderatedById: session.userId,
+        moderatedBy: session.userId,
         moderatedAt: new Date(),
       },
     });

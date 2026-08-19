@@ -22,7 +22,7 @@ export async function GET(
       where: { id: params.id },
       select: { id: true, displayName: true, status: true },
     });
-    if (!seller) throw new AppError("NOT_FOUND");
+    if (!seller) throw new AppError("VALIDATION_ERROR", { id: "Seller not found." });
 
     const { searchParams } = new URL(req.url);
     const days = Math.min(90, Math.max(7, parseInt(searchParams.get("days") ?? "30")));

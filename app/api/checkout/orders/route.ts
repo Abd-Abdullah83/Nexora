@@ -208,7 +208,7 @@ export async function POST(req: NextRequest) {
           orderNumber: generateOrderNumber(),
           userId: session.userId,
           status: "pending",
-          paymentStatus: paymentMethod === "cod" ? "unpaid" : "pending",
+          paymentStatus: paymentMethod === "cod" ? "unpaid" : "unpaid",
           subtotal,
           discountAmount,
           shippingCost: 0,
@@ -225,7 +225,7 @@ export async function POST(req: NextRequest) {
               productId: li!.productId,
               productName: li!.productName,
               productSku: li!.productSku,
-              sellerId: li!.sellerId, // ← PHASE 6
+              sellerId: li!.sellerId!, // ← PHASE 6
               quantity: li!.quantity,
               unitPrice: li!.unitPrice,
               totalPrice: li!.totalPrice,
@@ -241,16 +241,17 @@ export async function POST(req: NextRequest) {
 
       await tx.cartItem.deleteMany({ where: { userId: session.userId } });
 
-      return created;
+      return created as any;
     });
 
     // ── Send order confirmation email — unchanged ───────────────────────────
     try {
+      const fullOrder = order as any;
       await sendOrderConfirmationEmail({
-        orderNumber: order.orderNumber,
-        customerName: order.user.fullName,
-        customerEmail: order.user.email,
-        items: order.items.map((item) => ({
+        orderNumber: fullOrder.orderNumber,
+        customerName: fullOrder.user.fullName,
+        customerEmail: fullOrder.user.email,
+        items: fullOrder.items.map((item: any) => ({
           productName: item.productName,
           quantity: item.quantity,
           unitPrice: Number(item.unitPrice),

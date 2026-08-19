@@ -170,7 +170,7 @@ export async function manuallyReleaseEscrowHold(params: {
     });
 
     // Credit the seller's available balance
-    await tx.sellerWallet.update({
+    await tx.wallet.update({
       where: { sellerId: hold.sellerId },
       data: {
         availableBalance: { increment: hold.grossAmount },
@@ -179,7 +179,7 @@ export async function manuallyReleaseEscrowHold(params: {
     });
 
     // Write a ledger entry so the balance change is traceable
-    const wallet = await tx.sellerWallet.findUnique({
+    const wallet = await tx.wallet.findUnique({
       where: { sellerId: hold.sellerId },
       select: { availableBalance: true },
     });

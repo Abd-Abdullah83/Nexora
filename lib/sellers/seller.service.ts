@@ -89,7 +89,7 @@ export async function transitionSellerStatus(
     });
   }
 
-  await prisma.seller.update({ where: { id: sellerId }, data: { status: to } });
+  await prisma.seller.update({ where: { id: sellerId }, data: { status: to as any } });
 }
 
 // ── Application ──────────────────────────────────────────────────────────

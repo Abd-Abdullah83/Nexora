@@ -68,9 +68,9 @@ export async function POST(
     const buffer = Buffer.from(bytes);
 
     // Magic byte validation — same as admin image upload
-    const validation = validateImageFile(buffer, file.name);
-    if (!validation.valid) {
-      throw new AppError("UPLOAD_INVALID_TYPE", { file: validation.reason });
+    const validation = validateImageFile(buffer, file.type);
+    if (validation) {
+      throw new AppError(validation.code);
     }
 
     // FIX: removed the erroneous file.name second argument — that param

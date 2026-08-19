@@ -136,6 +136,7 @@ export async function createListing(
   const product = await prisma.product.create({
     data: {
       ...rest,
+      sku: rest.sku || `SKU-${Date.now()}`,
       status: resolvedStatus,
       slug,
       // FIX 2: collapsed broken multi-line connect into standard inline form
