@@ -3,6 +3,8 @@ import { requireAdmin } from "@/lib/auth/rbac";
 import { prisma } from "@/lib/db/prisma";
 import { AppError, errorResponse } from "@/lib/errors";
 
+export const dynamic = "force-dynamic";
+
 export async function GET(req: NextRequest) {
   try {
     const session = await requireAdmin();

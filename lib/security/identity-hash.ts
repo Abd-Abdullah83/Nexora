@@ -24,17 +24,17 @@ import { createHmac } from "crypto";
  * shouldn't be affected.
  */
 
-const SECRET =
-  process.env.IDENTITY_HASH_SECRET || "dev-only-identity-hash-secret-change-me";
-
-if (process.env.NODE_ENV === "production" && !process.env.IDENTITY_HASH_SECRET) {
-  // Loud, not silent — an identity hash generated with the fallback
-  // secret today can never be matched against one generated with a real
-  // secret after this gets fixed, silently breaking ban-evasion detection
-  // with no error anywhere. Better to fail the deploy than fail silently.
-  throw new Error(
-    "IDENTITY_HASH_SECRET must be set in production. Generate one with: openssl rand -hex 32"
-  );
+function getSecret(): string {
+  if (process.env.NODE_ENV === "production" && !process.env.IDENTITY_HASH_SECRET) {
+    // Loud, not silent — an identity hash generated with the fallback
+    // secret today can never be matched against one generated with a real
+    // secret after this gets fixed, silently breaking ban-evasion detection
+    // with no error anywhere. Better to fail runtime than crash build.
+    throw new Error(
+      "IDENTITY_HASH_SECRET must be set in production. Generate one with: openssl rand -hex 32"
+    );
+  }
+  return process.env.IDENTITY_HASH_SECRET || "dev-only-identity-hash-secret-change-me";
 }
 
 /**
@@ -56,5 +56,5 @@ export function normalizeIdentityValue(raw: string): string {
 
 export function hashIdentityValue(raw: string): string {
   const normalized = normalizeIdentityValue(raw);
-  return createHmac("sha256", SECRET).update(normalized).digest("hex");
+  return createHmac("sha256", getSecret()).update(normalized).digest("hex");
 }
