@@ -397,3 +397,118 @@ export async function getSellerDetailForAdmin(sellerId: string) {
 
   return seller;
 }
+
+// ── Two-admin ban request flow ─────────────────────────────────────────────
+
+/**
+ * Step 1: An admin requests a ban. Creates a pending SellerBanRequest.
+ * The seller is NOT banned yet — a second admin must call confirmSellerBan().
+ */
+export async function requestSellerBan(params: {
+  sellerId: string;
+  adminUserId: string;
+  reason: string;
+}) {
+  const { sellerId, adminUserId, reason } = params;
+  await getSellerOrThrow(sellerId);
+
+  // Check there is no already-pending request
+  const existing = await prisma.sellerBanRequest.findFirst({
+    where: { sellerId, status: "pending" },
+  });
+  if (existing) {
+    throw new AppError("VALIDATION_ERROR", {
+      sellerId: "A pending ban request already exists for this seller.",
+    });
+  }
+
+  const request = await prisma.sellerBanRequest.create({
+    data: { sellerId, requestedBy: adminUserId, reason, status: "pending" },
+  });
+
+  await logAuditEvent({
+    userId: adminUserId,
+    action: "admin.seller_ban_requested",
+    resourceType: "seller",
+    resourceId: sellerId,
+    ipAddress: "internal",
+    newValues: { reason },
+  });
+
+  return request;
+}
+
+/**
+ * Step 2: A DIFFERENT admin confirms the pending ban request.
+ * This executes the actual ban via the existing banSeller() function.
+ */
+export async function confirmSellerBan(params: {
+  sellerId: string;
+  confirmingAdminUserId: string;
+}) {
+  const { sellerId, confirmingAdminUserId } = params;
+
+  const request = await prisma.sellerBanRequest.findFirst({
+    where: { sellerId, status: "pending" },
+  });
+  if (!request) {
+    throw new AppError("VALIDATION_ERROR", {
+      sellerId: "No pending ban request found for this seller.",
+    });
+  }
+  if (request.requestedBy === confirmingAdminUserId) {
+    throw new AppError("VALIDATION_ERROR", {
+      adminId: "The confirming admin must be different from the requesting admin.",
+    });
+  }
+
+  // Mark request as confirmed
+  await prisma.sellerBanRequest.update({
+    where: { id: request.id },
+    data: { status: "confirmed", confirmedBy: confirmingAdminUserId, confirmedAt: new Date() },
+  });
+
+  // Execute the actual ban
+  const result = await banSeller({
+    sellerId,
+    adminUserId: confirmingAdminUserId,
+    reason: request.reason,
+  });
+
+  return result;
+}
+
+/**
+ * Either admin can cancel a pending ban request — no irreversible action taken.
+ */
+export async function cancelBanRequest(params: {
+  sellerId: string;
+  adminUserId: string;
+}) {
+  const { sellerId, adminUserId } = params;
+
+  const request = await prisma.sellerBanRequest.findFirst({
+    where: { sellerId, status: "pending" },
+  });
+  if (!request) {
+    throw new AppError("VALIDATION_ERROR", {
+      sellerId: "No pending ban request found for this seller.",
+    });
+  }
+
+  await prisma.sellerBanRequest.update({
+    where: { id: request.id },
+    data: { status: "cancelled", cancelledBy: adminUserId, cancelledAt: new Date() },
+  });
+
+  await logAuditEvent({
+    userId: adminUserId,
+    action: "admin.seller_ban_request_cancelled",
+    resourceType: "seller",
+    resourceId: sellerId,
+    ipAddress: "internal",
+    newValues: {},
+  });
+
+  return { sellerId, status: "ban_request_cancelled" };
+}

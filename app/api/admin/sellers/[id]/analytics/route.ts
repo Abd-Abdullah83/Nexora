@@ -6,7 +6,7 @@
 import { NextRequest } from "next/server";
 import { requireAdmin } from "@/lib/auth/rbac";
 import { prisma } from "@/lib/db/prisma";
-import { getSellerAnalytics } from "@/lib/sellers/analytics.service";
+import { getFullSellerAnalytics } from "@/lib/sellers/analytics.service";
 import { AppError, errorResponse } from "@/lib/errors";
 
 export async function GET(
@@ -27,7 +27,11 @@ export async function GET(
     const { searchParams } = new URL(req.url);
     const days = Math.min(90, Math.max(7, parseInt(searchParams.get("days") ?? "30")));
 
-    const analytics = await getSellerAnalytics({ sellerId: params.id, days });
+    const toDate = new Date();
+    const fromDate = new Date();
+    fromDate.setDate(toDate.getDate() - days);
+
+    const analytics = await getFullSellerAnalytics({ sellerId: params.id, fromDate, toDate });
     return Response.json({ seller, analytics });
   } catch (error) {
     return errorResponse(error);
