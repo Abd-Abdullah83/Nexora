@@ -124,27 +124,32 @@ export async function getProducts(filters: ProductFilters = {}) {
     where.categoryId = { in: categoryIds };
   }
 
-  const [items, total] = await Promise.all([
-    prisma.product.findMany({
-      where,
-      include: {
-        images: { orderBy: { displayOrder: "asc" } },
-        category: true,
-      },
-      orderBy: resolveSortOrder(sort),
-      skip: (page - 1) * pageSize,
-      take: pageSize,
-    }),
-    prisma.product.count({ where }),
-  ]);
+  try {
+    const [items, total] = await Promise.all([
+      prisma.product.findMany({
+        where,
+        include: {
+          images: { orderBy: { displayOrder: "asc" } },
+          category: true,
+        },
+        orderBy: resolveSortOrder(sort),
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+      prisma.product.count({ where }),
+    ]);
 
-  return {
-    items,
-    total,
-    page,
-    pageSize,
-    totalPages: Math.ceil(total / pageSize),
-  };
+    return {
+      items,
+      total,
+      page,
+      pageSize,
+      totalPages: Math.ceil(total / pageSize),
+    };
+  } catch (error) {
+    console.error("Failed to fetch products:", error);
+    return { items: [], total: 0, page, pageSize, totalPages: 0 };
+  }
 }
 
 export async function getProductBySlug(slug: string) {

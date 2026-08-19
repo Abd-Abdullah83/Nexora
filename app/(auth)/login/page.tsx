@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { InputField } from "@/components/ui/InputField";
@@ -9,7 +9,7 @@ import { AuthBackground } from "@/components/ui/AuthBackground";
 import { AuthCard } from "@/components/ui/AuthCard";
 import { SuccessMessage } from "@/components/ui/SuccessMessage";
 
-export default function LoginPage() {
+function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -154,3 +154,12 @@ export default function LoginPage() {
     </AuthBackground>
   );
 }
+
+export default function LoginPage() {
+  return (
+    <Suspense fallback={null}>
+      <LoginForm />
+    </Suspense>
+  );
+}
+

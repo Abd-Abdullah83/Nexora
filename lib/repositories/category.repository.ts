@@ -115,10 +115,15 @@ export async function getActiveCategoryTree(): Promise<CategoryNode[]> {
 
 /** Flat list for dropdowns (sorted by level then name). */
 export async function getActiveCategories() {
-  return prisma.category.findMany({
-    where: { isActive: true },
-    orderBy: [{ level: "asc" }, { displayOrder: "asc" }, { name: "asc" }],
-  });
+  try {
+    return await prisma.category.findMany({
+      where: { isActive: true },
+      orderBy: [{ level: "asc" }, { displayOrder: "asc" }, { name: "asc" }],
+    });
+  } catch (error) {
+    console.error("Failed to fetch active categories:", error);
+    return [];
+  }
 }
 
 export async function getCategoryBySlug(slug: string) {

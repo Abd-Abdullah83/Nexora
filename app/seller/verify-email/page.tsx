@@ -1,7 +1,10 @@
+import { Suspense } from "react";
 import { getActiveCategories } from "@/lib/repositories/category.repository";
 import { StorefrontHeader } from "@/components/storefront/StorefrontHeader";
 import { Footer } from "@/components/storefront/Footer";
 import SellerVerifyEmailContent from "./SellerVerifyEmailContent";
+
+export const dynamic = "force-dynamic";
 
 export default async function SellerVerifyEmailPage() {
   const categories = await getActiveCategories();
@@ -10,8 +13,11 @@ export default async function SellerVerifyEmailPage() {
   return (
     <div className="min-h-screen bg-ivory">
       <StorefrontHeader />
-      <SellerVerifyEmailContent />
+      <Suspense fallback={null}>
+        <SellerVerifyEmailContent />
+      </Suspense>
       <Footer categories={rootCategories} />
     </div>
   );
 }
+

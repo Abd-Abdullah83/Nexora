@@ -7,7 +7,8 @@ import { Footer } from "@/components/storefront/Footer";
 import { HeroSlider } from "@/components/storefront/HeroSlider";
 import { CategoryScroll } from "@/components/storefront/CategoryScroll";
 
-export const revalidate = 60;
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 export default async function HomePage() {
   const [featured, newArrivals, categories] = await Promise.all([

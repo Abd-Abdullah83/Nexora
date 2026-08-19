@@ -3,6 +3,8 @@ import { StorefrontHeader } from "@/components/storefront/StorefrontHeader";
 import { Footer } from "@/components/storefront/Footer";
 import SellerApplyForm from "./SellerApplyForm";
 
+export const dynamic = "force-dynamic";
+
 // This file is a Server Component (no "use client") so it can fetch
 // categories the same way app/page.tsx does, then wraps the actual
 // interactive form (moved to SellerApplyForm.tsx, a Client Component)
