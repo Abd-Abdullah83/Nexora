@@ -1,0 +1,5 @@
+-- This migration's original content (CREATE INDEX
+-- products_status_idx_pending_review) was fully redundant with
+-- products_status_idx from 20260702100002_add_listing_approval_columns —
+-- same table, same column, same WHERE predicate, just a different name.
+-- Left empty intentionally rather than creating a duplicate index.

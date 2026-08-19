@@ -1,0 +1,1884 @@
+// Prisma schema — Phase 2 Marketplace: Seller Registration & Verification
+// All changes are additive. No existing model changed except Seller (new columns).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────────────────────────────────────
+
+enum Role {
+  customer
+  admin
+  seller_individual
+  seller_business
+}
+
+enum SellerType {
+  individual
+  business
+}
+
+// Phase 1 had: pending, active, suspended, banned
+// Phase 2 adds the full registration state machine:
+//   pending_email_verification → pending_phone_verification
+//   → pending_kyc (Phase 3) → pending_approval (Phase 3) → active | rejected
+enum SellerStatus {
+  pending_email_verification
+  pending_phone_verification
+  pending_kyc
+  pending_approval
+  active
+  suspended
+  banned
+  rejected
+}
+
+// Phase 3 — KYC/KYB document types a seller can be asked to submit.
+// national_id / passport satisfy the "personal ID" requirement (exactly
+// one of the two is required, not both). business_registration,
+// trade_license, and tax_certificate are additionally required only for
+// sellerType = business. See lib/sellers/verification.service.ts for the
+// exact per-seller-type requirement logic.
+enum SellerDocType {
+  national_id
+  passport
+  business_registration
+  trade_license
+  tax_certificate
+}
+
+
+enum ProductBanRequestStatus {
+  pending
+  confirmed
+  cancelled
+}
+
+
+// Per-document review state. Distinct from SellerStatus (which tracks the
+// seller's overall application state) — a seller can have some documents
+// "verified" and others still "submitted" while the seller is
+// pending_approval.
+enum VerificationStatus {
+  submitted
+  verified
+  rejected
+}
+
+// What kind of identity number a row in seller_identity_hashes represents.
+// Deliberately narrower than SellerDocType — trade_license numbers are not
+// hashed for ban-evasion matching (see PHASE_3_NOTES.md for why).
+enum IdentityType {
+  national_id
+  passport
+  business_reg
+  tax_id
+}
+
+
+enum SellerAppealStatus {
+  open
+  seller_replied
+  admin_replied
+  resolved_upheld
+  resolved_lifted
+}
+
+enum AppealSenderRole {
+  system
+  seller
+  admin
+}
+// ── Phase 4: Store, subscription, billing ───────────────────────────────
+
+enum SubscriptionPlan {
+  individual // USD 15/month
+  business   // USD 60/month
+}
+
+// trialing: free month, no charge attempted yet
+// active: trial ended, most recent charge succeeded (or trial still running counts as trialing, not active)
+// past_due: a charge was due and failed (or no real processor exists yet to attempt one) — grace period
+// cancelled: seller or admin cancelled; store no longer publicly visible
+enum SubscriptionStatus {
+  trialing
+  active
+  past_due
+  cancelled
+}
+
+enum InvoiceStatus {
+  pending
+  paid
+  failed
+}
+
+// ── Phase 6: per-order-line fulfillment (was missing from this base
+// schema snapshot — added here alongside Phase 7's enums since Phase 7
+// depends directly on it) ─────────────────────────────────────────────
+enum OrderItemFulfillmentStatus {
+  pending
+  confirmed
+  shipped
+  delivered
+  cancelled
+}
+
+// ── Phase 7: Escrow, Wallet & Commission Engine ─────────────────────────
+
+enum LedgerEntryType {
+  escrow_hold      // funds captured, held against an order line
+  commission       // platform's cut, deducted at release
+  subscription_fee // seller's subscription due, reconciled at release
+  release          // net amount credited to seller's available balance
+  refund           // funds returned to buyer, reversing a hold
+  payout           // funds paid out to seller's bank (Phase 8)
+  adjustment       // manual admin correction, always audit-logged
+}
+
+// ── Phase 8 payout state machine ─────────────────────────────────────────
+// requested  → seller submitted, not yet actioned
+// processing → admin acknowledged, payment initiated externally
+// paid       → admin confirmed sent; postLedgerEntry("payout") fires HERE
+// failed     → payment bounced or account details wrong; no ledger change
+// cancelled  → seller cancelled while still "requested"; no ledger change
+// Only ONE active (requested|processing) payout per seller is allowed —
+// enforced in payout.service.ts.
+enum PayoutStatus {
+  requested
+  processing
+  paid
+  failed
+  cancelled
+}
+
+enum EscrowHoldStatus {
+  held      // funds captured, waiting on delivery + the 10-day window
+  released  // funds moved to seller's available balance
+  frozen    // admin manually extended past the normal release point
+  disputed  // an open dispute exists (Phase 9) — blocks release
+}
+enum ProductStatus {
+  draft
+  pending_review
+  active
+  archived
+  rejected
+  admin_suspended
+  admin_banned
+
+}
+
+enum SellerBanRequestStatus {
+  pending
+  confirmed
+  cancelled
+}
+
+
+enum OrderStatus {
+  pending
+  confirmed
+  shipped
+  delivered
+  cancelled
+  refunded
+}
+
+enum PaymentStatus {
+  unpaid
+  paid
+  refunded
+  failed
+}
+
+enum ReviewStatus {
+  pending
+  approved
+  rejected
+  flagged
+}
+
+enum DiscountType {
+  percentage
+  fixed_amount
+}
+
+enum CategoryRequestStatus {
+  pending
+  approved
+  rejected
+}
+
+enum AttributeType {
+  select
+  color
+  number
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// USERS
+// ─────────────────────────────────────────────────────────────────────────
+
+model User {
+  id       String   @id @default(uuid())
+  email    String   @unique
+  username String   @unique
+  password String
+  role     Role     @default(customer)
+
+  fullName  String
+  phone     String?
+  avatarUrl String?
+
+  emailVerified      Boolean   @default(false)
+  emailVerifyToken   String?
+  emailVerifyExpires DateTime?
+
+  passwordResetToken   String?
+  passwordResetExpires DateTime?
+
+  twoFactorSecret  String?
+  twoFactorEnabled Boolean @default(false)
+
+  failedLoginCount Int       @default(0)
+  lockedUntil      DateTime?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+
+  productsSuspended        Product[]           @relation("ProductSuspender")
+   productsBanned           Product[]           @relation("ProductBanner")
+   productBanRequestsMade      ProductBanRequest[] @relation("ProductBanRequestInitiator")
+   productBanRequestsConfirmed ProductBanRequest[] @relation("ProductBanRequestConfirmer")
+   productBanRequestsCancelled ProductBanRequest[] @relation("ProductBanRequestCanceller")
+
+
+  auditLogs        AuditLog[]
+  cartItems        CartItem[]
+  wishlistItems    Wishlist[]
+  orders           Order[]
+  reviews          Review[]
+  moderatedReviews Review[]          @relation("ReviewModerator")
+  whatsappSessions WhatsappSession[]
+  reviewVotes      ReviewVote[]
+  seller           Seller?
+  reviewedVerifications SellerVerification[] @relation("VerificationReviewer")
+  resolvedDisputes      Dispute[]            @relation("DisputeResolver")
+
+ reviewedCategoryRequests CategoryRequest[] @relation("CategoryRequestReviewer")
+
+
+  // Phase 10: messaging
+  buyerThreads  MessageThread[] @relation("BuyerThreads")
+  sentMessages  Message[]       @relation("SentMessages")
+
+  // Phase 11: admin ban actions
+  banActions    SellerBanRecord[] @relation("BanAdmin")
+
+// Phase 12: admin overrides
+  adminOverrides   AdminOverride[]
+
+banRequestsInitiated SellerBanRequest[] @relation("BanRequestInitiator")
+banRequestsConfirmed SellerBanRequest[] @relation("BanRequestConfirmer")
+banRequestsCancelled SellerBanRequest[] @relation("BanRequestCanceller")
+
+reviewedProducts    Product[] @relation("ProductReviewer")
+trustGrantsIssued   Seller[]  @relation("SellerTrustGranter")
+moderationResolutions ListingModerationFlag[]
+notifications       Notification[]
+assignedSupportTickets SupportTicket[] @relation("SupportAssignee")
+sentSupportMessages SupportTicketMessage[]
+
+  @@map("users")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// SELLERS — Phase 1 foundation + Phase 2 registration fields
+// ─────────────────────────────────────────────────────────────────────────
+
+model Seller {
+  id     String @id @default(uuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id])
+
+  sellerType SellerType
+  status     SellerStatus @default(pending_email_verification)
+
+  // System seller anchor (Phase 1)
+  isSystemSeller Boolean @default(false)
+
+  // ── Phase 2: Registration profile ──────────────────────────────────────
+  displayName             String?  // Store display name chosen at registration
+  businessEmail           String?  // Seller's business contact email (may differ from login email)
+  businessPhone           String?  // For phone OTP verification
+
+  // ── Phase 2: Email verification ────────────────────────────────────────
+  emailVerifyToken        String?  // Secure random token for email link
+  emailVerifyExpires      DateTime?
+  emailVerifiedAt         DateTime?
+
+  // ── Phase 2: Phone OTP verification ────────────────────────────────────
+  phoneOtp                String?  // Hashed OTP (never stored plaintext)
+  phoneOtpExpires         DateTime?
+  phoneOtpAttempts        Int      @default(0)  // Max 3 before lockout
+  phoneVerifiedAt         DateTime?
+
+  // ── Phase 2: Terms agreement ────────────────────────────────────────────
+  agreedToTermsAt         DateTime?
+  agreedToTermsVersion    String?   // e.g. "v1.0" — so future terms changes are trackable
+
+  // ── Registration metadata ───────────────────────────────────────────────
+  registrationIp          String?
+  registrationUserAgent   String?
+ categoryRequests CategoryRequest[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+banRequests SellerBanRequest[]
+
+  products  Product[]
+  otpLogs   SellerOtpLog[]
+  verifications  SellerVerification[]
+  identityHashes SellerIdentityHash[]
+
+  // ── Phase 4: Store, billing, settings ───────────────────────────────────
+  store            Store?
+  subscription     SellerSubscription?
+  invoices         SubscriptionInvoice[]
+  shippingSettings SellerShippingSettings?
+  returnPolicy     SellerReturnPolicy?
+  taxSettings      SellerTaxSettings?
+
+  // ── Phase 6: order fulfillment ──────────────────────────────────────────
+  orderItems OrderItem[]
+
+  // ── Phase 7: wallet, ledger, escrow ──────────────────────────────────────
+  wallet        Wallet?
+  ledgerEntries LedgerEntry[]
+  escrowHolds   EscrowHold[]
+
+  // ── Phase 8: payouts, bank account ───────────────────────────────────────
+  payoutRequests PayoutRequest[]
+  bankAccount    SellerBankAccount?
+
+  // ── Phase 10: promotions, messages ────────────────────────────────────
+  promotions       SellerPromotion[]
+  messageThreads   MessageThread[]
+
+  // ── Phase 11: ban/suspension tracking ─────────────────────────────────
+  // bannedAt/bannedBy/banReason are set when status → banned.
+  // suspendedUntil is set when status → suspended (null = indefinite).
+  // These are intentionally denormalized onto the Seller row so a single
+  // lookup tells you everything about the current enforcement state —
+  // the full history lives in SellerBanRecord.
+  bannedAt       DateTime?
+  bannedBy       String?   // admin userId
+  banReason      String?
+  suspendedUntil DateTime? // null = indefinite suspension or not suspended
+
+  banRecords         SellerBanRecord[]
+  banEvasionAlerts   BanEvasionAlert[] @relation("NewSellerAlerts")
+
+isTrustedSeller      Boolean   @default(false)
+approvedListingCount Int       @default(0)
+trustGrantedAt       DateTime?
+trustGrantedBy       String?
+trustGranter         User?     @relation("SellerTrustGranter", fields: [trustGrantedBy], references: [id])
+ratingsAggregate     SellerRatingsAggregate?
+supportTickets       SupportTicket[]
+appeals              SellerAppeal[]
+
+  @@map("sellers")  
+@@index([userId])
+  @@index([status])
+  @@index([businessEmail])
+  @@index([businessPhone])
+  @@index([emailVerifyToken])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// SELLER OTP LOG — Phase 2
+// One row per phone-OTP request. Used both as the rate-limit source of
+// truth (count rows in the last hour) and as an audit trail of OTP
+// issuance. The OTP itself is bcrypt-hashed, never stored in plaintext.
+// ─────────────────────────────────────────────────────────────────────────
+
+model SellerOtpLog {
+  id       String @id @default(uuid())
+  sellerId String
+  seller   Seller @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  phone     String
+  otpHash   String
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+
+  @@map("seller_otp_logs")
+  @@index([sellerId, phone, createdAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// SELLER VERIFICATION — Phase 3 (KYC / KYB)
+// One row per document type a seller has submitted. Re-submission after a
+// rejection UPDATES this row (upsert on [sellerId, docType]) rather than
+// creating a new one — audit_logs is the historical record of every
+// submit/approve/reject event; this table only reflects current state.
+// fileRef is a Cloudinary public_id for a PRIVATE/authenticated asset —
+// NEVER a public URL. Resolve to a short-lived signed URL on demand via
+// lib/storage/kyc-documents.ts; never store or cache a plain URL.
+// ─────────────────────────────────────────────────────────────────────────
+
+model SellerVerification {
+  id       String @id @default(uuid())
+  sellerId String
+  seller   Seller @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  docType SellerDocType
+  fileRef String // Cloudinary public_id — NOT a URL
+
+  status          VerificationStatus @default(submitted)
+  rejectionReason String?
+
+  reviewedBy String?
+  reviewer   User?     @relation("VerificationReviewer", fields: [reviewedBy], references: [id])
+  reviewedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("seller_verifications")
+  @@unique([sellerId, docType])
+  @@index([sellerId])
+  @@index([status])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// SELLER IDENTITY HASH — Phase 3
+// Salted (HMAC-keyed) hash of a seller-submitted identity number, kept for
+// future duplicate / ban-evasion matching (Phase 11). The raw identity
+// number is NEVER stored anywhere — only this hash. See
+// lib/security/identity-hash.ts for why this uses a deterministic keyed
+// hash (HMAC) instead of bcrypt.
+// ─────────────────────────────────────────────────────────────────────────
+
+model SellerIdentityHash {
+  id       String @id @default(uuid())
+  sellerId String
+  seller   Seller @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  identityType IdentityType
+  hash         String
+
+  createdAt DateTime @default(now())
+
+  @@map("seller_identity_hashes")
+  @@unique([sellerId, identityType])
+  @@index([hash])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// STORE — Phase 4
+// One store per approved seller, created automatically the moment a
+// seller's status transitions to "active" (see lib/sellers/store.service.ts
+// createStoreForSeller(), called from verification.service.ts's approval
+// branch). themeJson is intentionally a small, fixed shape (see
+// lib/validation/store.ts) — not arbitrary CSS, to keep the public
+// storefront page's rendering safe and predictable.
+// ─────────────────────────────────────────────────────────────────────────
+
+model Store {
+  id       String @id @default(uuid())
+  sellerId String @unique
+  seller   Seller @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  name        String
+  slug        String  @unique
+  logoUrl     String?
+  bannerUrl   String?
+ logoPublicId   String?
+  bannerPublicId String?
+
+  description String?
+  themeJson   Json    @default("{}")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ── Phase 10: seller rating aggregate ──────────────────────────────────
+  // Cached denormalized aggregate — updated by ratings.service.ts
+  // recomputeStoreRating() whenever a product review on this seller's
+  // item is approved/rejected/modified. Never written directly by a
+  // route; always derived from the Review table.
+  avgRating    Decimal? @db.Decimal(3, 2) // null = no approved reviews yet
+  reviewCount  Int      @default(0)
+
+  @@map("stores")
+  @@index([slug])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// SELLER SUBSCRIPTION — Phase 4
+// One row per seller. trialEndAt is set once, at creation (approval time).
+// currentPeriodEnd is recalculated whenever a charge succeeds (none can
+// yet — see lib/sellers/billing.service.ts for the honest "not yet
+// configured" stub) or when an admin manually marks an invoice paid in
+// the interim, before a real recurring-billing gateway exists.
+// ─────────────────────────────────────────────────────────────────────────
+
+model SellerSubscription {
+  id       String @id @default(uuid())
+  sellerId String @unique
+  seller   Seller @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  plan   SubscriptionPlan
+  status SubscriptionStatus @default(trialing)
+
+  trialEndAt       DateTime
+  currentPeriodEnd DateTime?
+
+  // Set the first time status moves past_due -> here for the grace-period
+  // clock; cleared if a payment succeeds and status returns to active.
+  pastDueSince DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("seller_subscriptions")
+  @@index([sellerId])
+  @@index([status])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// SUBSCRIPTION INVOICE — Phase 4
+// One row per billing period, real or stubbed. While no payment gateway
+// is wired, every invoice this phase creates is status="pending" forever
+// (or manually flipped by an admin action — not built in this phase) —
+// never silently marked "paid" by client-trusted code.
+// ─────────────────────────────────────────────────────────────────────────
+
+model SubscriptionInvoice {
+  id       String @id @default(uuid())
+  sellerId String
+  seller   Seller @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  amount   Decimal @db.Decimal(10, 2)
+  currency String  @default("USD") @db.Char(3)
+  status   InvoiceStatus @default(pending)
+
+  billingPeriodStart DateTime
+  billingPeriodEnd   DateTime
+  paidAt             DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@map("subscription_invoices")
+  @@index([sellerId])
+  @@index([status])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// SELLER SHIPPING SETTINGS — Phase 4
+// ─────────────────────────────────────────────────────────────────────────
+
+model SellerShippingSettings {
+  id       String @id @default(uuid())
+  sellerId String @unique
+  seller   Seller @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  zonesJson         Json @default("[]") // [{ region, rateAmount, currency }]
+  processingTimeDays Int  @default(2)
+  carrierPrefsJson  Json @default("[]") // [{ carrierName, accountRef }]
+
+  updatedAt DateTime @updatedAt
+
+  @@map("seller_shipping_settings")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// SELLER RETURN POLICY — Phase 4
+// returnWindowDays is validated server-side against MarketplaceSettings'
+// minReturnWindowDays on every write — see lib/sellers/settings.service.ts.
+// ─────────────────────────────────────────────────────────────────────────
+
+model SellerReturnPolicy {
+  id       String @id @default(uuid())
+  sellerId String @unique
+  seller   Seller @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  returnWindowDays Int     @default(7)
+  conditionsText   String?
+
+  updatedAt DateTime @updatedAt
+
+  @@map("seller_return_policies")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// SELLER TAX SETTINGS — Phase 4
+// A configurable flat-rate MECHANISM, not a tax-law compliance engine —
+// the seller (or their accountant) is responsible for entering a
+// legally-correct rate; this only stores and applies whatever rate is
+// entered. taxRegistrationNumber is sensitive — access-restricted to the
+// owning seller + Admin only, see the security note in the API routes.
+// ─────────────────────────────────────────────────────────────────────────
+
+model SellerTaxSettings {
+  id       String @id @default(uuid())
+  sellerId String @unique
+  seller   Seller @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  taxRegistrationNumber String?
+  regionRulesJson        Json   @default("[]") // [{ region, ratePercent }]
+
+  updatedAt DateTime @updatedAt
+
+  @@map("seller_tax_settings")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// MARKETPLACE SETTINGS — Phase 4
+// Singleton table (exactly one row, id always "global") for admin-tunable,
+// marketplace-wide values. Starts with just the return-window minimum;
+// designed to grow. No admin UI to edit this yet (not required by this
+// phase's acceptance criteria) — change it directly via Prisma Studio or
+// a future admin settings page.
+// ─────────────────────────────────────────────────────────────────────────
+
+model MarketplaceSettings {
+  id                   String @id @default("global")
+  minReturnWindowDays  Int    @default(7) // matches the original single-vendor store's existing 7-day policy
+
+  // Phase 8: "Optional scheduled automatic payout (e.g. weekly) as a
+  // configurable Admin setting, off by default initially per Section
+  // 2.3's recommendation." This column exists and is read by
+  // payout.service.ts, but there is no job scheduler anywhere in this
+  // codebase (same gap noted for Phase 4's trial-expiry check and
+  // Phase 7's release job) — so even with this flipped true, nothing
+  // currently triggers an automatic run on a schedule. It's wired up as
+  // a setting an admin can toggle now, ready for whenever a real
+  // scheduler is introduced; until then, payouts remain seller-initiated
+  // regardless of this flag's value.
+  autoPayoutEnabled Boolean @default(false)
+
+  updatedAt            DateTime @updatedAt
+
+  @@map("marketplace_settings")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// WALLET — Phase 7
+// One per seller. Balance fields are DERIVED/CACHED from the sum of that
+// seller's ledger_entries — never written directly by any route or
+// component other than lib/wallet/ledger.service.ts's postLedgerEntry().
+// pendingBalance = funds held in escrow, not yet release-eligible.
+// availableBalance = released, withdrawable (Phase 8 payout draws from
+// this). heldBalance = subset of pending that's specifically frozen/
+// disputed (not simply "not yet 10 days old").
+// ─────────────────────────────────────────────────────────────────────────
+
+model Wallet {
+  id       String @id @default(uuid())
+  sellerId String @unique
+  seller   Seller @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  pendingBalance   Decimal @default(0) @db.Decimal(12, 2)
+  availableBalance Decimal @default(0) @db.Decimal(12, 2)
+  heldBalance      Decimal @default(0) @db.Decimal(12, 2)
+  currency         String  @default("PKR") @db.Char(3)
+
+  updatedAt DateTime @updatedAt
+
+  @@map("wallets")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// LEDGER ENTRY — Phase 7
+// Append-only. Nothing in this codebase ever UPDATEs or DELETEs a row
+// here — corrections are posted as new "adjustment" entries, never edits
+// to history. idempotencyKey is unique and is what makes
+// postLedgerEntry() safe to call twice for the same event (a retried
+// admin click, a re-run of the release job) without double-posting.
+// balanceAfter is the seller's availableBalance immediately after this
+// entry was applied — a point-in-time snapshot for audit/display, not a
+// value anything reads to compute current balance (the Wallet row is).
+// ─────────────────────────────────────────────────────────────────────────
+
+model LedgerEntry {
+  id       String @id @default(uuid())
+  sellerId String
+  seller   Seller @relation(fields: [sellerId], references: [id])
+
+  orderItemId String?
+  orderItem   OrderItem? @relation(fields: [orderItemId], references: [id])
+
+  entryType LedgerEntryType
+  amount    Decimal @db.Decimal(12, 2) // positive = credit to seller, negative = debit
+  balanceAfter Decimal @db.Decimal(12, 2)
+
+  idempotencyKey String @unique
+  note           String?
+
+  createdAt DateTime @default(now())
+
+  // Back-relation for PayoutRequest.ledgerEntryId (Phase 8) — a ledger
+  // entry of entryType="payout" has exactly one PayoutRequest pointing
+  // to it, never more (enforced by the unique constraint on the other side).
+  payoutRequest PayoutRequest?
+  dispute       Dispute?      // Phase 9 — set when this entry is a dispute refund
+
+  @@map("ledger_entries")
+  @@index([sellerId])
+  @@index([orderItemId])
+  @@index([sellerId, createdAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// ESCROW HOLD — Phase 7
+// One row per order_item (1:1, enforced by the unique constraint on
+// orderItemId). Created the moment payment is captured for that line
+// (see lib/wallet/escrow.service.ts createEscrowHold(), called from
+// confirmOrderPayment() in order.repository.ts). deliveredAt and
+// releaseEligibleAt are both null until Phase 6's updateFulfillmentStatus
+// marks the line "delivered" — at that moment releaseEligibleAt is set
+// to deliveredAt + 10 days, and only then can the release job ever touch
+// this row.
+// ─────────────────────────────────────────────────────────────────────────
+
+model EscrowHold {
+  id          String @id @default(uuid())
+  orderItemId String @unique
+  orderItem   OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+
+  sellerId String
+  seller   Seller @relation(fields: [sellerId], references: [id])
+
+  status EscrowHoldStatus @default(held)
+
+  grossAmount Decimal @db.Decimal(12, 2) // the order line's totalPrice, captured verbatim at hold creation
+
+  deliveredAt        DateTime?
+  releaseEligibleAt  DateTime?
+  releasedAt         DateTime?
+
+  // Set only when status = frozen — an admin extending a hold for fraud
+  // review per the doc's "Admin manual hold capability."
+  frozenAt     DateTime?
+  frozenBy     String?
+  freezeReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("escrow_holds")
+  @@index([sellerId])
+  @@index([status])
+  @@index([status, releaseEligibleAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// COMMISSIONS CONFIG — Phase 7
+// Versioned by effectiveFrom/effectiveTo so a rate change never alters
+// the commission already calculated for past, already-released orders —
+// getCommissionRate() in lib/wallet/commission.service.ts always looks
+// up the row whose [effectiveFrom, effectiveTo) range contains the
+// ORDER'S delivery date, not "today's" rate.
+// ─────────────────────────────────────────────────────────────────────────
+
+model CommissionConfig {
+  id         String     @id @default(uuid())
+  sellerType SellerType
+  ratePercent Decimal   @db.Decimal(5, 2) // e.g. 2.50, 2.30
+
+  effectiveFrom DateTime @default(now())
+  effectiveTo   DateTime? // null = currently in effect, open-ended
+
+  createdAt DateTime @default(now())
+
+  @@map("commissions_config")
+  @@index([sellerType, effectiveFrom])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// SELLER BANK ACCOUNT — Phase 8
+//
+// One bank account per seller (unique on sellerId). Account number is
+// stored as plain text here but MUST be encrypted at rest before going
+// to production — see PHASE_8_NOTES.md §Security. We follow the same
+// honest-stub pattern used across Phase 4 (billing) and Phase 7 (no real
+// payment gateway): the model and all logic work correctly in dev without
+// encryption; the security gap is documented, not hidden.
+//
+// When returning bank account data to ANY client, only mask is ever sent
+// — never the full accountNumber. See payout.service.ts's
+// maskBankAccount() helper.
+// ─────────────────────────────────────────────────────────────────────────
+
+model SellerBankAccount {
+  id       String @id @default(uuid())
+  sellerId String @unique
+  seller   Seller @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  accountHolderName String
+  bankName          String
+  accountNumber     String  // ⚠️ ENCRYPT AT REST before production — see notes
+  routingCode       String? // IBAN / sort code / routing number — bank-specific
+  accountType       String  @default("current") // current | savings
+
+  // Set true by an admin once a test payout to this account succeeds.
+  // No automatic verification — keeps the gate honest (not fake success).
+  isVerified Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("seller_bank_accounts")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// PAYOUT REQUEST — Phase 8
+//
+// One payout request per seller, maximum one active (requested/processing)
+// at a time — enforced in payout.service.ts, not just the UI.
+//
+// The ledger `payout` entry is posted ONLY when an admin marks a request
+// as `paid` — not when it's requested or processing. This means
+// `availableBalance` is not touched until money actually moves, which
+// keeps the balance figure honest at every stage. Cancelling or failing
+// a request does not need a compensating ledger entry because none was
+// ever posted.
+//
+// bankAccountSnapshot is a JSON snapshot of the bank account details as
+// they were at request time — so a later bank account update never alters
+// the historical record of where a payout was sent. The snapshot contains
+// the MASKED account number only (see maskBankAccount()) — never the full
+// account number, even in this server-side-only field.
+// ─────────────────────────────────────────────────────────────────────────
+
+model PayoutRequest {
+  id       String @id @default(uuid())
+  sellerId String
+  seller   Seller @relation(fields: [sellerId], references: [id], onDelete: Restrict)
+
+  amount   Decimal @db.Decimal(12, 2)
+  currency String  @default("PKR") @db.Char(3)
+  status   PayoutStatus @default(requested)
+
+  // Snapshot of the bank account at request time (masked account number only)
+  bankAccountSnapshot Json
+
+  // Admin processing fields
+  processedBy String?
+  processedAt DateTime?
+  adminNote   String?
+
+  // Linked ledger entry — set when status moves to "paid". Nullable AND
+  // has a real FK constraint to ledger_entries (a nullable column can
+  // still have a FK in Postgres — it just allows NULL OR a valid match).
+  // The unique constraint on this column is what prevents a double-
+  // mark-paid from ever creating two debit entries for the same payout;
+  // the FK additionally guarantees it can never point at a row that
+  // doesn't exist.
+  ledgerEntryId String? @unique
+  ledgerEntry   LedgerEntry? @relation(fields: [ledgerEntryId], references: [id])
+
+  requestedAt DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("payout_requests")
+  @@index([sellerId])
+  @@index([status])
+  @@index([sellerId, status])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// AUDIT LOG
+// ─────────────────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id     String  @id @default(uuid())
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id])
+
+  action       String
+  resourceType String?
+  resourceId   String?
+
+  oldValues Json?
+  newValues Json?
+
+  ipAddress String
+  userAgent String?
+
+  createdAt DateTime @default(now())
+
+  @@map("audit_logs")
+  @@index([userId])
+  @@index([action])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// CATALOG
+// ─────────────────────────────────────────────────────────────────────────
+
+model Category {
+  id   String @id @default(uuid())
+  name String
+  slug String @unique
+
+  description String?
+  imageUrl    String?
+requiresManualReview Boolean @default(false)
+
+  parentId String?
+  parent   Category?  @relation("CategoryHierarchy", fields: [parentId], references: [id])
+  children Category[] @relation("CategoryHierarchy")
+
+  level        Int     @default(0)
+  displayOrder Int     @default(0)
+  isActive     Boolean @default(true)
+
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+
+parentRequestCandidates CategoryRequest[] @relation("CategoryRequestParent")
+   resolvedFromRequests    CategoryRequest[] @relation("CategoryRequestResolved")
+
+
+  products   Product[]
+  attributes CategoryAttribute[]
+
+  @@map("categories")
+  @@index([slug])
+  @@index([parentId])
+}
+
+model CategoryAttribute {
+  id         String   @id @default(uuid())
+  categoryId String
+  category   Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  name    String
+  key     String
+  type    AttributeType
+  options Json    @default("[]")
+  unit    String?
+
+  isRequired   Boolean @default(true)
+  displayOrder Int     @default(0)
+
+  createdAt DateTime @default(now())
+
+  @@map("category_attributes")
+  @@unique([categoryId, key])
+  @@index([categoryId])
+}
+
+model Product {
+  id   String @id @default(uuid())
+  name String
+  slug String @unique
+
+  description      String
+  shortDescription String?
+
+  price        Decimal  @db.Decimal(10, 2)
+  comparePrice Decimal? @db.Decimal(10, 2)
+  salePrice    Decimal? @db.Decimal(10, 2)
+  saleEndsAt   DateTime?
+  costPrice    Decimal? @db.Decimal(10, 2)
+
+  categoryId String
+  category   Category @relation(fields: [categoryId], references: [id])
+
+  sellerId String?
+  seller   Seller? @relation(fields: [sellerId], references: [id])
+
+  sku               String @unique
+  stockQty          Int    @default(0)
+  lowStockThreshold Int    @default(5)
+  weightGrams       Int?
+
+  status       ProductStatus @default(draft)
+  isFeatured   Boolean       @default(false)
+  isBestSeller Boolean       @default(false)
+  isNewArrival Boolean       @default(false)
+
+  tags     String[] @default([])
+  currency String   @default("PKR")
+  videoUrl String?
+
+  metaTitle       String?
+  metaDescription String?
+  aiSummary       String?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  images     ProductImage[]
+  variants   ProductVariant[]
+  cartItems  CartItem[]
+  wishlisted Wishlist[]
+  orderItems OrderItem[]
+  reviews    Review[]
+  promotions SellerPromotion[]  // Phase 10
+
+  suspendedAt      DateTime?
+   suspendedBy      String?
+   suspender        User?     @relation("ProductSuspender", fields: [suspendedBy], references: [id])
+   suspensionReason String?
+   bannedAt         DateTime?
+   bannedBy         String?
+   banner           User?     @relation("ProductBanner", fields: [bannedBy], references: [id])
+   banReason        String?
+   banRequests      ProductBanRequest[]
+
+
+
+reviewedBy      String?
+reviewer        User?     @relation("ProductReviewer", fields: [reviewedBy], references: [id])
+reviewedAt      DateTime?
+rejectionReason String?
+moderationFlags ListingModerationFlag[] 
+
+ @@map("products")
+  @@index([slug])
+  @@index([categoryId])
+  @@index([sellerId])
+  @@index([status])
+  @@index([isFeatured])
+  @@index([isBestSeller])
+  @@index([isNewArrival])
+}
+
+model ProductImage {
+  id        String  @id @default(uuid())
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  url          String
+  storageKey   String?
+  altText      String?
+  displayOrder Int     @default(0)
+  isPrimary    Boolean @default(false)
+
+  @@map("product_images")
+  @@index([productId])
+}
+
+model ProductVariant {
+  id        String  @id @default(uuid())
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  name  String
+  sku   String  @unique
+  price Decimal? @db.Decimal(10, 2)
+
+  stockQty          Int @default(0)
+  lowStockThreshold Int @default(5)
+  weightGrams       Int?
+
+  attributeValues Json    @default("{}")
+  isActive        Boolean @default(true)
+  createdAt       DateTime @default(now())
+
+  cartItems  CartItem[]
+  orderItems OrderItem[]
+
+  @@map("product_variants")
+  @@index([productId])
+  @@index([sku])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// CART & WISHLIST
+// ─────────────────────────────────────────────────────────────────────────
+
+model CartItem {
+  id        String  @id @default(uuid())
+  userId    String
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  variantId String?
+  variant   ProductVariant? @relation(fields: [variantId], references: [id])
+
+  quantity Int      @default(1)
+  addedAt  DateTime @default(now())
+
+  @@map("cart_items")
+  @@unique([userId, productId, variantId])
+  @@index([userId])
+}
+
+model Wishlist {
+  id        String  @id @default(uuid())
+  userId    String
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  addedAt DateTime @default(now())
+
+  @@map("wishlists")
+  @@unique([userId, productId])
+  @@index([userId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// ORDERS
+// ─────────────────────────────────────────────────────────────────────────
+
+model Order {
+  id          String @id @default(uuid())
+  orderNumber String @unique
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
+
+  status          OrderStatus   @default(pending)
+  paymentStatus   PaymentStatus @default(unpaid)
+  paymentIntentId String?       @unique
+
+  subtotal       Decimal @db.Decimal(10, 2)
+  discountAmount Decimal @default(0) @db.Decimal(10, 2)
+  shippingCost   Decimal @default(0) @db.Decimal(10, 2)
+  taxAmount      Decimal @default(0) @db.Decimal(10, 2)
+  total          Decimal @db.Decimal(10, 2)
+  currency       String  @default("PKR") @db.Char(3)
+
+  shippingAddress Json
+
+  couponId String?
+  coupon   Coupon? @relation(fields: [couponId], references: [id])
+
+  notes          String?
+  trackingNumber String?
+  trackingUrl    String?
+  paidAt         DateTime?
+  refundReference String?
+  refundAmount   Decimal?  @db.Decimal(10, 2)
+  refundedAt     DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items          OrderItem[]
+  messageThreads MessageThread[]  // Phase 10
+
+  @@map("orders")
+  @@index([userId])
+  @@index([status])
+  @@index([orderNumber])
+}
+
+model OrderItem {
+  id      String @id @default(uuid())
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+
+  variantId String?
+  variant   ProductVariant? @relation(fields: [variantId], references: [id])
+
+  // ── Phase 6: which seller fulfils this specific line ───────────────────
+  sellerId String
+  seller   Seller @relation(fields: [sellerId], references: [id])
+
+  productName String
+  productSku  String
+
+  quantity   Int
+  unitPrice  Decimal @db.Decimal(10, 2)
+  totalPrice Decimal @db.Decimal(10, 2)
+
+  // ── Phase 6: per-seller fulfillment, independent of the parent Order's
+  // whole-order OrderStatus (which remains buyer-facing/legacy) ──────────
+  fulfillmentStatus     OrderItemFulfillmentStatus @default(pending)
+  sellerTrackingNumber  String?
+  sellerTrackingUrl     String?
+  shippedAt             DateTime?
+  deliveredAt           DateTime?
+  cancelledAt           DateTime?
+  cancellationReason    String?
+
+  // ── Phase 7: one escrow hold per order line ─────────────────────────────
+  escrowHold    EscrowHold?
+  ledgerEntries LedgerEntry[]
+
+  // ── Phase 9: disputes ───────────────────────────────────────────────────
+  disputes Dispute[]
+
+  @@map("order_items")
+  @@index([orderId])
+  @@index([productId])
+  @@index([sellerId])
+  @@index([sellerId, fulfillmentStatus])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// REVIEWS
+// ─────────────────────────────────────────────────────────────────────────
+
+model Review {
+  id        String  @id @default(uuid())
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User    @relation(fields: [userId], references: [id])
+
+  rating  Int
+  title   String?
+  comment String
+
+  status      ReviewStatus @default(pending)
+  moderatedBy String?
+  moderator   User?        @relation("ReviewModerator", fields: [moderatedBy], references: [id])
+  moderatedAt DateTime?
+
+  createdAt       DateTime @default(now())
+  helpfulCount    Int      @default(0)
+  notHelpfulCount Int      @default(0)
+  votes           ReviewVote[]
+
+  @@map("reviews")
+  @@unique([userId, productId])
+  @@index([productId])
+  @@index([status])
+}
+
+model ReviewVote {
+  id       String @id @default(uuid())
+  reviewId String
+  review   Review @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  userId   String
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  helpful Boolean
+
+  createdAt DateTime @default(now())
+
+  @@map("review_votes")
+  @@unique([reviewId, userId])
+  @@index([reviewId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// COUPONS
+// ─────────────────────────────────────────────────────────────────────────
+
+model Coupon {
+  id          String  @id @default(uuid())
+  code        String  @unique
+  description String?
+
+  discountType  DiscountType
+  discountValue Decimal      @db.Decimal(10, 2)
+
+  minOrderAmount Decimal? @db.Decimal(10, 2)
+  maxUses        Int?
+  usedCount      Int      @default(0)
+
+  expiresAt DateTime?
+  isActive  Boolean   @default(true)
+
+  createdAt DateTime @default(now())
+
+  orders Order[]
+
+  @@map("coupons")
+  @@index([code])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// WHATSAPP
+// ─────────────────────────────────────────────────────────────────────────
+
+model WhatsappSession {
+  id          String  @id @default(uuid())
+  phoneNumber String
+  userId      String?
+  user        User?   @relation(fields: [userId], references: [id])
+
+  context       Json     @default("{}")
+  lastMessageAt DateTime @default(now())
+  createdAt     DateTime @default(now())
+
+  @@map("whatsapp_sessions")
+  @@index([phoneNumber])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// DISPUTE — Phase 9
+// Returns, Refunds & Dispute Resolution.
+//
+// State machine:
+//   open → seller_review → admin_review → resolved_refunded / resolved_denied
+//   open → resolved_refunded (seller accepts immediately)
+//
+// One active dispute per order_item at a time (enforced in
+// dispute.service.ts). A resolved dispute can be followed by a new one
+// only after the first is in a terminal state.
+//
+// ledgerEntryId is the Phase 9 idempotency guard: if a refund ledger
+// entry is already linked, dispute.service.ts refuses to post another.
+// ─────────────────────────────────────────────────────────────────────────
+
+enum DisputeType {
+  return
+  refund
+  chargeback
+}
+
+enum DisputeStatus {
+  open
+  seller_review
+  admin_review
+  resolved_refunded
+  resolved_denied
+}
+
+enum DisputeOpenedBy {
+  buyer
+  seller
+  admin
+}
+
+model Dispute {
+  id          String    @id @default(uuid())
+  orderItemId String
+  orderItem   OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
+
+  openedBy DisputeOpenedBy @default(buyer)
+  type     DisputeType
+  status   DisputeStatus   @default(open)
+
+  buyerReason      String
+  sellerResponse   String?
+  sellerResponseAt DateTime?
+  resolutionNotes  String?
+  resolvedBy       String?
+  resolver         User?    @relation("DisputeResolver", fields: [resolvedBy], references: [id])
+
+  refundAmount Decimal? @db.Decimal(12, 2)
+
+  // Linked ledger entry — set only when resolved_refunded
+  // Unique constraint prevents a second refund entry being posted for the
+  // same dispute (the ledgerEntryId unique index + service-level check).
+  ledgerEntryId String?      @unique
+  ledgerEntry   LedgerEntry? @relation(fields: [ledgerEntryId], references: [id])
+
+  createdAt  DateTime  @default(now())
+  resolvedAt DateTime?
+  updatedAt  DateTime  @updatedAt
+
+  @@map("disputes")
+  @@index([orderItemId])
+  @@index([status])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// PHASE 10 ADDITIONS
+// ─────────────────────────────────────────────────────────────────────────
+
+// ── Promotions ─────────────────────────────────────────────────────────
+
+enum PromotionType {
+  percentage
+  fixed_amount
+}
+
+// Seller-created discount codes, scoped to their own listings only.
+// A SellerPromotion is deliberately a SEPARATE table from the platform's
+// Coupon model — they share similar fields but have different ownership,
+// scope, and lifecycle. Merging them would require adding nullable
+// sellerId to Coupon and special-casing everywhere coupons are used;
+// keeping them separate means the platform's own coupon logic is
+// untouched, and the checkout route just checks BOTH sources in order.
+model SellerPromotion {
+  id       String @id @default(uuid())
+  sellerId String
+  seller   Seller @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  code        String @unique
+  description String?
+
+  promotionType  PromotionType
+  discountValue  Decimal @db.Decimal(10, 2)
+
+  // Scope: null productId = store-wide, specific productId = single listing
+  productId String?
+  product   Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  minOrderAmount Decimal? @db.Decimal(10, 2)
+  maxUses        Int?
+  usedCount      Int      @default(0)
+
+  expiresAt DateTime?
+  isActive  Boolean   @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("seller_promotions")
+  @@index([sellerId])
+  @@index([code])
+  @@index([sellerId, isActive])
+}
+
+// ── Messaging ─────────────────────────────────────────────────────────
+
+enum MessageSenderRole {
+  buyer
+  seller
+}
+
+// One thread per (buyer, seller, order) combination — enforced by the
+// unique constraint. A buyer can message a seller about multiple orders
+// (creates multiple threads), but not have duplicate threads for the
+// same order.
+model MessageThread {
+  id       String @id @default(uuid())
+  sellerId String
+  seller   Seller @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  buyerId  String
+  buyer    User   @relation("BuyerThreads", fields: [buyerId], references: [id], onDelete: Cascade)
+  orderId  String
+  order    Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  // Unread count from seller's perspective — incremented when buyer posts,
+  // reset to 0 when seller opens/reads the thread. Drives the inbox badge.
+  sellerUnread Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages Message[]
+
+  @@map("message_threads")
+  @@unique([buyerId, sellerId, orderId])
+  @@index([sellerId])
+  @@index([buyerId])
+  @@index([sellerId, sellerUnread])
+}
+
+model Message {
+  id       String @id @default(uuid())
+  threadId String
+  thread   MessageThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+
+  senderRole MessageSenderRole
+  senderId   String
+  sender     User   @relation("SentMessages", fields: [senderId], references: [id])
+
+  body String
+
+  createdAt DateTime @default(now())
+
+  @@map("messages")
+  @@index([threadId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// SELLER BAN RECORD — Phase 11
+//
+// Immutable audit trail of every ban, suspension, and reinstatement
+// action taken against a seller. One row per enforcement action — the
+// Seller.status column reflects the CURRENT state; this table holds the
+// full history.
+//
+// triggeredByHashIds: array of SellerIdentityHash.id values that caused
+// this action, if it was a ban-evasion detection. Empty for manual bans.
+// Stored as a JSON array of UUID strings rather than a relation table
+// to keep the migration simple and because querying "which bans were
+// triggered by this hash" is an admin-only edge case, not a hot path.
+// ─────────────────────────────────────────────────────────────────────────
+
+enum BanAction {
+  banned
+  suspended
+  reinstated
+}
+
+model SellerBanRecord {
+  id       String @id @default(uuid())
+  sellerId String
+  seller   Seller @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  action   BanAction
+  reason   String
+  adminId  String
+  admin    User      @relation("BanAdmin", fields: [adminId], references: [id])
+
+  // Which identity hash matches triggered this action (empty = manual)
+  // Stored as JSON array of SellerIdentityHash.id strings
+  triggeredByHashIds Json @default("[]")
+
+  // For suspensions: when the suspension expires (null = indefinite)
+  suspendedUntil DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@map("seller_ban_records")
+  @@index([sellerId])
+  @@index([sellerId, action])
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// BAN EVASION ALERT — Phase 11
+//
+// Created when identity-hash duplicate detection fires during KYC
+// approval — i.e. the new seller's identity hashes match a banned
+// seller's hashes. The alert does NOT automatically block approval;
+// it surfaces the match to the admin who then decides whether to ban
+// or proceed (legitimate cases: family members with the same NIC number
+// are rare but real — always a human decision).
+//
+// status: "pending" until an admin takes action (approve_anyway or ban).
+// resolvedBy / resolvedAt set when the admin acts.
+// ─────────────────────────────────────────────────────────────────────────
+
+enum BanEvasionAlertStatus {
+  pending       // waiting for admin review
+  approved      // admin decided to proceed with activation despite match
+  ban_confirmed // admin banned the seller based on this alert
+}
+
+model BanEvasionAlert {
+  id             String @id @default(uuid())
+  newSellerId    String // the seller whose KYC triggered this alert
+  newSeller      Seller @relation("NewSellerAlerts", fields: [newSellerId], references: [id], onDelete: Cascade)
+
+  matchedSellerId String // the existing banned seller whose hash matched
+  // No FK here intentionally — the banned seller may be soft-deleted
+  // or otherwise cleaned up; we still want the alert record.
+
+  matchedIdentityType IdentityType // which hash type matched (e.g. national_id)
+  matchedHashId       String       // SellerIdentityHash.id that triggered the match
+
+  status      BanEvasionAlertStatus @default(pending)
+  resolvedBy  String?               // admin userId
+  resolvedAt  DateTime?
+  adminNote   String?
+
+  createdAt DateTime @default(now())
+
+  @@map("ban_evasion_alerts")
+  @@index([newSellerId])
+  @@index([status])
+}
+
+
+enum OverrideResourceType {
+  order
+  escrow_hold
+  listing
+}
+
+enum OverrideAction {
+  order_force_complete
+  order_force_cancel
+  escrow_manual_release
+  escrow_manual_unfreeze
+  listing_force_archive
+  listing_force_reactivate
+}
+
+model AdminOverride {
+  id           String               @id @default(uuid())
+  adminId      String
+  admin        User                 @relation(fields: [adminId], references: [id], onDelete: Restrict)
+
+  resourceType OverrideResourceType
+  resourceId   String
+
+  action       OverrideAction
+  reason       String
+
+  beforeState  Json?
+  afterState   Json?
+
+  createdAt    DateTime             @default(now())
+
+  @@map("admin_overrides")
+  @@index([adminId])
+  @@index([resourceId])
+  @@index([resourceType])
+  @@index([createdAt(sort: Desc)])
+}
+
+// ── Gap Fill: Listing Moderation ─────────────────────────────────────────
+
+enum ModerationFlagStatus {
+  pending
+  cleared
+  rejected
+}
+
+enum ModerationRaisedBy {
+  system
+  admin
+}
+
+model ListingModerationFlag {
+  id          String  @id @default(uuid())
+  productId   String
+  product     Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  reason      String
+  status      ModerationFlagStatus @default(pending)
+  raisedBy    ModerationRaisedBy   @default(system)
+
+  resolvedBy     String?
+  resolver       User?    @relation(fields: [resolvedBy], references: [id], onDelete: SetNull)
+  resolutionNote String?
+  resolvedAt     DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@map("listing_moderation_flags")
+  @@index([productId])
+  @@index([status])
+}
+
+// ── Gap Fill: Notifications ───────────────────────────────────────────────
+
+enum NotificationType {
+  order_status_changed
+  dispute_opened
+  dispute_resolved
+  payout_paid
+  payout_failed
+  listing_moderation
+  support_ticket_reply
+ listing_suspended
+ listing_banned
+}
+
+model Notification {
+  id      String           @id @default(uuid())
+  userId  String
+  user    User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type    NotificationType
+  payload Json             @default("{}")
+  readAt  DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@map("notifications")
+  @@index([userId, readAt])
+  @@index([userId, createdAt(sort: Desc)])
+}
+
+// ── Gap Fill: Support Tickets ─────────────────────────────────────────────
+
+enum SupportTicketStatus {
+  open
+  in_progress
+  resolved
+  closed
+}
+
+enum SupportTicketPriority {
+  low
+  normal
+  high
+  urgent
+}
+
+enum SupportSenderRole {
+  seller
+  admin
+}
+
+model SupportTicket {
+  id       String @id @default(uuid())
+  sellerId String
+  seller   Seller @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  subject    String
+  status     SupportTicketStatus    @default(open)
+  priority   SupportTicketPriority  @default(normal)
+  assignedTo String?
+  assignee   User?   @relation("SupportAssignee", fields: [assignedTo], references: [id], onDelete: SetNull)
+
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  resolvedAt DateTime?
+
+  messages SupportTicketMessage[]
+
+  @@map("support_tickets")
+  @@index([sellerId])
+  @@index([status])
+}
+
+model SupportTicketMessage {
+  id         String            @id @default(uuid())
+  ticketId   String
+  ticket     SupportTicket     @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  senderRole SupportSenderRole
+  senderId   String
+  sender     User              @relation(fields: [senderId], references: [id], onDelete: Restrict)
+  body       String
+
+  createdAt DateTime @default(now())
+
+  @@map("support_ticket_messages")
+  @@index([ticketId])
+}
+
+// ── Gap Fill: Seller Ratings Aggregate ────────────────────────────────────
+
+model SellerRatingsAggregate {
+  id       String @id @default(uuid())
+  sellerId String @unique
+  seller   Seller @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  avgRating          Decimal @default(0) @db.Decimal(3, 2)
+  totalReviews       Int     @default(0)
+  onTimeDeliveryRate Decimal @default(0) @db.Decimal(5, 2)
+  disputeRate        Decimal @default(0) @db.Decimal(5, 2)
+
+  updatedAt DateTime @updatedAt
+
+  @@map("seller_ratings_aggregates")
+}
+
+
+model SellerBanRequest {
+  id     String @id @default(uuid())
+  sellerId String
+  seller   Seller @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  reason String
+  status SellerBanRequestStatus @default(pending)
+
+  requestedBy String
+  requester   User     @relation("BanRequestInitiator", fields: [requestedBy], references: [id])
+  requestedAt DateTime @default(now())
+
+  confirmedBy String?
+  confirmer   User?     @relation("BanRequestConfirmer", fields: [confirmedBy], references: [id])
+  confirmedAt DateTime?
+
+  cancelledBy String?
+  canceller   User?     @relation("BanRequestCanceller", fields: [cancelledBy], references: [id])
+  cancelledAt DateTime?
+
+  @@map("seller_ban_requests")
+  @@index([sellerId])
+  @@index([status])
+}
+
+
+model SellerAppeal {
+  id       String @id @default(uuid())
+  sellerId String
+  seller   Seller @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  banRecordId String?
+
+  status SellerAppealStatus @default(open)
+
+  sellerUnread Int @default(0)
+  adminUnread  Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages SellerAppealMessage[]
+
+  @@map("seller_appeals")
+  @@index([sellerId])
+  @@index([status])
+}
+
+model SellerAppealMessage {
+  id       String       @id @default(uuid())
+  appealId String
+  appeal   SellerAppeal @relation(fields: [appealId], references: [id], onDelete: Cascade)
+
+  senderRole AppealSenderRole
+  senderId   String?
+  body       String
+
+  createdAt DateTime @default(now())
+
+  @@map("seller_appeal_messages")
+  @@index([appealId])
+}
+
+model CategoryRequest {
+  id       String @id @default(uuid())
+  sellerId String
+  seller   Seller @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  name        String
+  description String?
+
+  // Optional — seller can suggest this should be a subcategory of an
+  // existing one. Nullable = seller wants a new root-level category.
+  parentId String?
+  parent   Category? @relation("CategoryRequestParent", fields: [parentId], references: [id], onDelete: SetNull)
+
+  status CategoryRequestStatus @default(pending)
+
+  // Set only on approval — points to the real Category that was created.
+  resolvedCategoryId String?
+  resolvedCategory   Category? @relation("CategoryRequestResolved", fields: [resolvedCategoryId], references: [id], onDelete: SetNull)
+
+  reviewedBy     String?
+  reviewer       User?     @relation("CategoryRequestReviewer", fields: [reviewedBy], references: [id], onDelete: SetNull)
+  reviewedAt     DateTime?
+  resolutionNote String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("category_requests")
+  @@index([sellerId])
+  @@index([status])
+}
+
+model ProductBanRequest {
+  id        String  @id @default(uuid())
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  reason String
+  status ProductBanRequestStatus @default(pending)
+
+  requestedBy String
+  requester   User     @relation("ProductBanRequestInitiator", fields: [requestedBy], references: [id])
+  requestedAt DateTime @default(now())
+
+  confirmedBy String?
+  confirmer   User?     @relation("ProductBanRequestConfirmer", fields: [confirmedBy], references: [id])
+  confirmedAt DateTime?
+
+  cancelledBy String?
+  canceller   User?     @relation("ProductBanRequestCanceller", fields: [cancelledBy], references: [id])
+  cancelledAt DateTime?
+
+  @@map("product_ban_requests")
+  @@index([productId])
+  @@index([status])
+}
+
