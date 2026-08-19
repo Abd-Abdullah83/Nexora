@@ -73,7 +73,7 @@ function NotificationBody({ type, payload }: { type: string; payload: Record<str
       return (
         <p className="text-sm text-muted">
           A payout could not be processed.{" "}
-          {payload.reason && <span>Reason: <em>{String(payload.reason)}</em>.</span>}{" "}
+          {!!payload.reason && <span>Reason: <em>{String(payload.reason)}</em>.</span>}{" "}
           Please check your banking details.
         </p>
       );
