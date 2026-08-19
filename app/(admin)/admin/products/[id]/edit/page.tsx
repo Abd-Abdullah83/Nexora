@@ -46,7 +46,7 @@ export default async function EditProductPage({ params }: PageProps) {
             categoryId: product.categoryId,
             sku: product.sku,
             stockQty: String(product.stockQty),
-            status: product.status,
+            status: (["draft", "active", "archived"].includes(product.status) ? product.status : "draft") as "draft" | "active" | "archived",
             isFeatured: product.isFeatured,
             isBestSeller: product.isBestSeller,
             isNewArrival: product.isNewArrival,
