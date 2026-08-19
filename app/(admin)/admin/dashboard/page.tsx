@@ -302,7 +302,7 @@ export default function AdminDashboardPage() {
                         contentStyle={{ background: "#1a1a1a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 4 }}
                         labelStyle={{ color: "#c9a96e", fontSize: 12 }}
                         itemStyle={{ color: "#e5e7eb", fontSize: 12 }}
-                        formatter={(v: number) => [`PKR ${v.toFixed(0)}`, "Revenue"]}
+                        formatter={(v) => [`PKR ${Number(v ?? 0).toFixed(0)}`, "Revenue"]}
                       />
                       <Line type="monotone" dataKey="revenue" stroke="#c9a96e" strokeWidth={2} dot={false} />
                     </LineChart>
